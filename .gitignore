@@ -1,0 +1,28 @@
+# Секреты
+.env
+
+# Python мусор
+__pycache__/
+*.py[cod]
+venv/
+env/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Celery
+celerybeat-schedule
+celerybeat-schedule.bak
+celerybeat-schedule.dir
+celerybeat-schedule.dat
+
+# IDE
+.idea/
+.vscode/
+
+# Docker & Data
+.docker/
+postgres_data/
+redis_data/
+app/models_storage/
+app/hf_cache/

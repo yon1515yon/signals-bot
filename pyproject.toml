@@ -1,0 +1,45 @@
+[tool.black]
+line-length = 120
+target-version = ['py311']
+include = '\.pyi?$'
+exclude = '''
+/(
+    \.git
+  | \.hg
+  | \.mypy_cache
+  | \.tox
+  | \.venv
+  | _build
+  | buck-out
+  | build
+  | dist
+  | models_storage
+)/
+'''
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+exclude = [
+    ".bzr",
+    ".direnv",
+    ".eggs",
+    ".git",
+    ".hg",
+    ".mypy_cache",
+    ".tox",
+    ".venv",
+    "__pypackages__",
+    "_build",
+    "build",
+    "dist",
+    "venv",
+    "models_storage"
+]
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "B"]
+ignore = []
+
+fixable = ["ALL"]

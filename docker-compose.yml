@@ -1,0 +1,105 @@
+version: '3.8'
+
+services:
+  # --- База данных ---
+  postgres:
+    image: postgres:15-alpine
+    restart: always
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5435:5432" 
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # --- Redis (Очередь задач) ---
+  redis:
+    image: redis:7-alpine
+    restart: always
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # --- Основное API ---
+  api:
+    build: .
+    restart: always
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    env_file: .env
+    volumes:
+      - ./app:/app/app 
+      - models_data:/app/models_storage
+      - hf_cache:/app/hf_cache
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # --- Celery Worker (Исполнитель задач) ---
+  worker_light:
+    build: .
+    restart: always
+    command: celery -A app.worker.tasks.celery_app worker --loglevel=info -Q default --concurrency=4 --hostname=light@%h
+    env_file: .env
+    volumes:
+      - ./app:/app/app
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  # --- Heavy Worker (ML Обучение) ---
+  worker_heavy:
+    build: .
+    restart: always
+    command: celery -A app.worker.tasks.celery_app worker --loglevel=info -Q ml_training --concurrency=1 --hostname=heavy@%h
+    env_file: .env
+    volumes:
+      - ./app:/app/app
+      - models_data:/app/models_storage
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  # --- Celery Beat (Планировщик) ---
+  beat:
+    build: .
+    restart: always
+    command: celery -A app.worker.tasks.celery_app beat --loglevel=info
+    env_file: .env
+    volumes:
+      - ./app:/app/app
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  # --- Telegram Bot ---
+  bot:
+    build: .
+    restart: always
+    command: python -m app.services.bot
+    env_file: .env
+    volumes:
+      - ./app:/app/app
+    depends_on:
+      api:
+        condition: service_started
+
+volumes:
+  postgres_data:
+  redis_data:
+  models_data: # Общий том для хранения обученных моделей
+  hf_cache:    # Кэш для HuggingFace моделей (чтобы не качать каждый раз)

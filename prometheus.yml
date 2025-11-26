@@ -1,0 +1,8 @@
+global:
+  scrape_interval: 5s # Как часто собирать метрики
+
+scrape_configs:
+  - job_name: 'neurovision_api'
+    static_configs:
+      # Имя хоста 'api' совпадает с именем сервиса в docker-compose
+      - targets: ['api:8000']
