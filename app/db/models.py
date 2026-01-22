@@ -1,7 +1,18 @@
+from sqlalchemy import (
+    BIGINT,
+    Column,
+    DateTime,
+    Float,
+    ForeignKey,
+    Integer,
+    String,
+    UniqueConstraint,
+    func,
+)
+from sqlalchemy.orm import relationship
+from sqlalchemy.dialects.postgresql import JSONB 
 
 from app.db.database import Base
-from sqlalchemy import BIGINT, JSON, Column, DateTime, Float, ForeignKey, Integer, String, UniqueConstraint, func
-from sqlalchemy.orm import relationship
 
 
 class TrackedTicker(Base):
@@ -14,7 +25,7 @@ class TrackedTicker(Base):
     sentiment_score = Column(Float)
     risk_score = Column(Integer)
     global_bias = Column(String(20))
-    last_updated_at = Column(DateTime(timezone=True))
+    last_updated_at = Column(DateTime(timezone=True), index=True)
 
 
 class Forecast(Base):
@@ -22,23 +33,21 @@ class Forecast(Base):
 
     id = Column(Integer, primary_key=True)
     ticker = Column(String(10), nullable=False, index=True)
-    forecast_date = Column(DateTime, nullable=False)
+    forecast_date = Column(DateTime, nullable=False, index=True)
     forecast_value = Column(Float, nullable=False)
-    upper_bound = Column(Float)  
-    lower_bound = Column(Float)  
+    upper_bound = Column(Float)
+    lower_bound = Column(Float)
     __table_args__ = (UniqueConstraint("ticker", "forecast_date", name="_ticker_date_uc"),)
 
 
 class ForecastMetrics(Base):
-    """Хранит метрики качества и бэктеста для каждого тикера."""
-
     __tablename__ = "forecast_metrics"
 
     id = Column(Integer, primary_key=True)
     ticker = Column(String(10), unique=True, nullable=False, index=True)
-    backtest_metrics = Column(JSON)
-    multi_horizon_forecast = Column(JSON)  
-    bear_scenario_forecast = Column(JSON) 
+    backtest_metrics = Column(JSONB)  
+    multi_horizon_forecast = Column(JSONB)  
+    bear_scenario_forecast = Column(JSONB)  
     last_calculated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
 
@@ -64,8 +73,8 @@ class TradingSignal(Base):
     signal_type = Column(String(50), nullable=False)
     potential_profit_pct = Column(Float)
     forecast_days = Column(Integer)
-    details = Column(JSON)
-    generated_at = Column(DateTime(timezone=True), server_default=func.now())
+    details = Column(JSONB)  
+    generated_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)
 
 
 class DarkPoolSignal(Base):
@@ -73,7 +82,7 @@ class DarkPoolSignal(Base):
 
     id = Column(Integer, primary_key=True)
     ticker = Column(String(10), index=True)
-    signal_time = Column(DateTime(timezone=True), nullable=False)
+    signal_time = Column(DateTime(timezone=True), nullable=False, index=True)
     price = Column(Float, nullable=False)
     volume = Column(BIGINT)
     avg_volume = Column(BIGINT)
@@ -95,7 +104,7 @@ class IntradaySignal(Base):
     global_bias = Column(String(20))
     context_score = Column(Integer)
     related_zone_id = Column(Integer)
-    generated_at = Column(DateTime(timezone=True))
+    generated_at = Column(DateTime(timezone=True), index=True)
     __table_args__ = (UniqueConstraint("ticker", "generated_at", name="_ticker_generated_uc"),)
 
 
@@ -128,11 +137,10 @@ class Portfolio(Base):
 
     id = Column(Integer, primary_key=True)
     user_id = Column(BIGINT, unique=True, nullable=False, index=True)
-    initial_balance = Column(Float, default=1000000.0)
-    current_balance = Column(Float, default=1000000.0)
+    initial_capital = Column(Float, default=1000000.0)
+    current_capital = Column(Float, default=1000000.0)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
-    # Связь с позициями
     positions = relationship("Position", back_populates="portfolio", cascade="all, delete-orphan")
 
 
@@ -168,19 +176,14 @@ class Subscriber(Base):
     username = Column(String(100))
     subscribed_at = Column(DateTime(timezone=True), server_default=func.now())
 
-    def __repr__(self):
-        return f"<Subscriber(user_id={self.user_id})>"
-
 
 class StrategyPerformance(Base):
-    """Хранит статистику эффективности для каждой стратегии/типа сигнала."""
-
     __tablename__ = "strategy_performance"
 
     id = Column(Integer, primary_key=True)
     strategy_name = Column(String(50), unique=True, nullable=False, index=True)
     win_rate = Column(Float, default=0.5)
-    avg_profit_pct = Column(Float, default=5.0)  
-    avg_loss_pct = Column(Float, default=-3.0)  
+    avg_profit_pct = Column(Float, default=5.0)
+    avg_loss_pct = Column(Float, default=-3.0)
     trades_count = Column(Integer, default=0)
     last_calculated_at = Column(DateTime(timezone=True), onupdate=func.now())

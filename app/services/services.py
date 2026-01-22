@@ -1,38 +1,64 @@
 from datetime import datetime, timedelta
 from io import StringIO
+from typing import Optional
 from xml.parsers.expat import ExpatError
 
 import pandas as pd
 import requests
 import xmltodict
-from celery.utils.log import get_task_logger
+import structlog
+from typing import Optional
 
+# Tinkoff Imports
 from tinkoff.invest import CandleInterval, Client
 from tinkoff.invest.utils import now
 
 from app.config import settings
 from app.constants import CBR_KEY_RATE_URL, ROSSTAT_INFLATION_URL
 
-logger = get_task_logger(__name__)
+logger = structlog.get_logger()
 
 
-def get_all_russian_stocks():
-    """Получает список всех российских акций, торгуемых на MOEX (СИНХРОННАЯ ВЕРСИЯ)."""
+def get_all_russian_stocks(client: Optional[Client] = None):
+    """
+    Получает список всех российских акций.
+    Если передан client, использует его. Иначе создает новый.
+    """
+    if client:
+        return _fetch_stocks_internal(client)
+    
+    with Client(settings.TINKOFF_API_TOKEN) as new_client:
+        return _fetch_stocks_internal(new_client)
+
+def _fetch_stocks_internal(client: Client):
     stocks_info = []
-    with Client(settings.TINKOFF_API_TOKEN) as client:
-        instruments = client.instruments.shares()
-        for instrument in instruments.instruments:
-            if instrument.class_code == "TQBR" and instrument.currency == "rub":
-                stocks_info.append({"name": instrument.name, "ticker": instrument.ticker, "figi": instrument.figi})
+    instruments = client.instruments.shares()
+    for instrument in instruments.instruments:
+        if instrument.class_code == "TQBR" and instrument.currency == "rub":
+            stocks_info.append({"name": instrument.name, "ticker": instrument.ticker, "figi": instrument.figi})
     return stocks_info
 
 
+
 def get_historical_data(
-    figi: str, days: int, interval: CandleInterval = CandleInterval.CANDLE_INTERVAL_DAY
+    figi: str, 
+    days: int, 
+    interval: CandleInterval = CandleInterval.CANDLE_INTERVAL_DAY,
+    client: Optional[Client] = None
 ) -> pd.DataFrame:
-    """Загружает исторические данные (свечи) для указанного FIGI (СИНХРОННАЯ ВЕРСИЯ)."""
+    """
+    Загружает исторические данные.
+    Оптимизация: принимает client для переиспользования соединения.
+    """
+    if client:
+        return _fetch_candles_internal(client, figi, days, interval)
+    
+    with Client(settings.TINKOFF_API_TOKEN) as new_client:
+        return _fetch_candles_internal(new_client, figi, days, interval)
+    
+def _fetch_candles_internal(client: Client, figi: str, days: int, interval: CandleInterval) -> pd.DataFrame:
     candles_data = []
-    with Client(settings.TINKOFF_API_TOKEN) as client:
+    try:
         for candle in client.get_all_candles(
             figi=figi,
             from_=now() - timedelta(days=days),
@@ -48,52 +74,60 @@ def get_historical_data(
                     "volume": candle.volume,
                 }
             )
+    except Exception as e:
+        logger.error("Failed to fetch candles", figi=figi, error=str(e), days=days)
+        return pd.DataFrame()
+
     if not candles_data:
+        logger.warning("No candle data found", figi=figi)
         return pd.DataFrame()
     return pd.DataFrame(candles_data).sort_values(by="time")
 
-
-def get_order_book(figi: str) -> dict:
-    """Получает стакан ордеров для указанного FIGI."""
+def get_order_book(figi: str, client: Optional[Client] = None) -> dict:
+    """Получает стакан ордеров."""
+    if client:
+        return _fetch_ob_internal(client, figi)
+    
+    with Client(settings.TINKOFF_API_TOKEN) as new_client:
+        return _fetch_ob_internal(new_client, figi)
+    
+def _fetch_ob_internal(client: Client, figi: str) -> dict:
     try:
-        with Client(settings.TINKOFF_API_TOKEN) as client:
-            order_book = client.market_data.get_order_book(figi=figi, depth=20)
-            return {
-                "bids": [
-                    {"price": q.price.units + q.price.nano / 1e9, "quantity": q.quantity} for q in order_book.bids
-                ],
-                "asks": [
-                    {"price": q.price.units + q.price.nano / 1e9, "quantity": q.quantity} for q in order_book.asks
-                ],
-            }
+        order_book = client.market_data.get_order_book(figi=figi, depth=20)
+        return {
+            "bids": [
+                {"price": q.price.units + q.price.nano / 1e9, "quantity": q.quantity} for q in order_book.bids
+            ],
+            "asks": [
+                {"price": q.price.units + q.price.nano / 1e9, "quantity": q.quantity} for q in order_book.asks
+            ],
+        }
     except Exception as e:
-        print(f"Не удалось получить стакан для FIGI {figi}: {e}")
+        logger.error(f"Error fetching OrderBook for {figi}: {e}")
         return {"bids": [], "asks": []}
 
+def find_imoex_future_figi(client: Optional[Client] = None) -> str | None:
+    """Находит FIGI фьючерса на IMOEX."""
+    if client:
+        return _find_imoex_internal(client)
+    with Client(settings.TINKOFF_API_TOKEN) as new_client:
+        return _find_imoex_internal(new_client)
 
-def find_imoex_future_figi() -> str | None:
-    """
-    Находит FIGI самого ликвидного (ближайшего) фьючерса на Индекс МосБиржи (IMOEX).
-    """
+def _find_imoex_internal(client: Client) -> str | None:
+    futures = client.instruments.futures()
+    imoex_futures = []
+    target_basic_asset = "IMOEX"
 
-    with Client(settings.TINKOFF_API_TOKEN) as client:
-        futures = client.instruments.futures()
-        imoex_futures = []
+    for f in futures.instruments:
+        if f.basic_asset == target_basic_asset and f.expiration_date > now():
+            imoex_futures.append(f)
 
-        target_basic_asset = "IMOEX"
+    if not imoex_futures:
+        return None
 
-        for f in futures.instruments:
-            if f.basic_asset == target_basic_asset and f.expiration_date > now():
-                imoex_futures.append(f)
+    closest_future = sorted(imoex_futures, key=lambda f: f.expiration_date)[0]
+    return closest_future.figi
 
-        if not imoex_futures:
-            print(f"Не найдено ни одного активного фьючерса с базовым активом '{target_basic_asset}'.")
-            return None
-
-        closest_future = sorted(imoex_futures, key=lambda f: f.expiration_date)[0]
-
-        print(f"Найден актуальный фьючерс на IMOEX: {closest_future.ticker} (FIGI: {closest_future.figi})")
-        return closest_future.figi
 
 
 def get_cbr_key_rate() -> pd.DataFrame:
@@ -202,35 +236,32 @@ def get_combined_macro_data() -> pd.DataFrame:
 
 def get_cross_asset_data(days: int) -> pd.DataFrame:
     """
-    Загружает данные по коррелирующим активам: фьючерсам на USD/RUB и Золото.
-    Динамически находит актуальные FIGI.
+    Загружает данные по коррелирующим активам.
+    ОПТИМИЗАЦИЯ: Открываем ОДИН клиент для всех запросов внутри функции.
     """
-    logger.info("Загрузка данных по коррелирующим активам (фьючерсы Si, Gold)...")
-
+    logger.info("Загрузка данных по коррелирующим активам (USD, Gold)...")
+    
     usd_data = pd.DataFrame()
     gold_data = pd.DataFrame()
 
+    # Открываем соединение ОДИН раз
     with Client(settings.TINKOFF_API_TOKEN) as client:
         usd_future_figi = _find_future_figi_by_ticker(client, "Si")
         gold_future_figi = _find_future_figi_by_ticker(client, "GD")
-        # ------------------------------------------------
 
-    if usd_future_figi:
-        temp_usd = get_historical_data(figi=usd_future_figi, days=days)
-        if not temp_usd.empty:
-            usd_data = temp_usd[["time", "close"]].rename(columns={"close": "usd_rub_close"})
-        else:
-            logger.warning("Не удалось загрузить данные по фьючерсу USD/RUB (Si).")
+        if usd_future_figi:
+            # Передаем существующий client
+            temp_usd = get_historical_data(figi=usd_future_figi, days=days, client=client)
+            if not temp_usd.empty:
+                usd_data = temp_usd[["time", "close"]].rename(columns={"close": "usd_rub_close"})
 
-    if gold_future_figi:
-        temp_gold = get_historical_data(figi=gold_future_figi, days=days)
-        if not temp_gold.empty:
-            gold_data = temp_gold[["time", "close"]].rename(columns={"close": "gold_close"})
-        else:
-            logger.warning("Не удалось загрузить данные по фьючерсу на Золото (GD).")
+        if gold_future_figi:
+            # Передаем существующий client
+            temp_gold = get_historical_data(figi=gold_future_figi, days=days, client=client)
+            if not temp_gold.empty:
+                gold_data = temp_gold[["time", "close"]].rename(columns={"close": "gold_close"})
 
     if usd_data.empty and gold_data.empty:
-        logger.error("Не удалось загрузить данные ни по одному из кросс-активов.")
         return pd.DataFrame()
 
     if not usd_data.empty and not gold_data.empty:
@@ -242,24 +273,17 @@ def get_cross_asset_data(days: int) -> pd.DataFrame:
 
     merged_df.sort_values("time", inplace=True)
     merged_df.ffill(inplace=True)
-
     return merged_df
 
 
-def _find_future_figi_by_ticker(client, ticker_base: str) -> str | None:
-    """Находит FIGI для ближайшего активного фьючерса по базе тикера (e.g., 'Si', 'GD')."""
+def _find_future_figi_by_ticker(client: Client, ticker_base: str) -> str | None:
+    """Находит FIGI, используя уже открытый client."""
     try:
         futures = client.instruments.futures().instruments
         active_futures = [f for f in futures if f.ticker.startswith(ticker_base) and f.expiration_date > now()]
         if not active_futures:
-            logger.warning(f"Не найдено активных фьючерсов для базы '{ticker_base}'.")
             return None
-
         closest_future = sorted(active_futures, key=lambda f: f.expiration_date)[0]
-        logger.info(
-            f"Найден актуальный фьючерс для '{ticker_base}': {closest_future.ticker} (FIGI: {closest_future.figi})"
-        )
         return closest_future.figi
-    except Exception as e:
-        logger.error(f"Ошибка при поиске фьючерса для '{ticker_base}': {e}")
+    except Exception:
         return None

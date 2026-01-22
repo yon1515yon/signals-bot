@@ -182,3 +182,9 @@ class ForecastMetricsResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+class LocalTradeRequest(schemas.PositionBase):
+    ticker: str
+    price: float
+    direction: str = "LONG"
+    amount: float = 50000

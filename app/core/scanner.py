@@ -10,27 +10,15 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.constants import MAX_SPREAD_PCT, ROBUST_FACTOR
-from app.ml.market_analysis import get_global_market_regime
+from app.ml.market_analysis import get_market_regime_cached
 from app.ml.meta_model import get_meta_prediction_with_shap
 from app.services.services import get_historical_data, get_order_book
 
-_regime_cache = {"val": "Neutral", "time": datetime.min}
 MODEL_STORAGE_PATH = settings.MODEL_STORAGE_PATH
 
 
-def get_global_regime_cached():
-    now = datetime.utcnow()
-    if (now - _regime_cache["time"]).total_seconds() > 3600 * 4:  # 4 часа
-        try:
-            _regime_cache["val"] = get_global_market_regime()
-            _regime_cache["time"] = now
-            print(f"SCANNER: Обновлен режим рынка: {_regime_cache['val']}")
-        except Exception:
-            pass
-    return _regime_cache["val"]
 
-
-def check_liquidity_and_spread(order_book: dict, MIN_LIQUIDITY_RUB) -> bool:
+def check_liquidity_and_spread(order_book: dict, MIN_LIQUIDITY_RUB=1000000) -> bool:
     """Filter by liquidity and spread."""
     bids = order_book.get("bids", [])
     asks = order_book.get("asks", [])
@@ -42,12 +30,12 @@ def check_liquidity_and_spread(order_book: dict, MIN_LIQUIDITY_RUB) -> bool:
 
     # 1. Спред
     spread_pct = (best_ask - best_bid) / best_bid * 100
-    if spread_pct > MAX_SPREAD_PCT:  # Если спред > 1.5%, бумага неликвид
+    if spread_pct > MAX_SPREAD_PCT:
         return False
 
     # 2. Объем в стакане (глубина)
     total_bid_vol = sum(b["quantity"] * b["price"] for b in bids)
-    if total_bid_vol < MIN_LIQUIDITY_RUB:  # Если в стакане меньше миллиона, опасно
+    if total_bid_vol < MIN_LIQUIDITY_RUB:
         return False
 
     return True
@@ -55,9 +43,7 @@ def check_liquidity_and_spread(order_book: dict, MIN_LIQUIDITY_RUB) -> bool:
 
 def get_level_weight(level_row) -> float:
     """Вес уровня в зависимости от свежести (чем старше, тем слабее)."""
-    # Предполагаем, что в DataFrame есть колонка 'last_calculated_at'
-    # Если нет, вернем 1.0
-    # Для простоты вернем 1.0 пока, т.к. в run_scanner мы передаем DataFrame без дат
+
     return 1.0
 
 
@@ -78,7 +64,7 @@ def get_dynamic_threshold(historical_data: pd.DataFrame) -> float:
     atr_val = last.get("ATRr_14", last["close"] * 0.02)
     atr_pct = (atr_val / last["close"]) * 100
 
-    return max(1.5, atr_pct * 1.2)  # Порог = 1.2 дневных ATR
+    return max(1.5, atr_pct * 1.2)  
 
 
 def calculate_risk_score(forecast_df: pd.DataFrame, sentiment_score: float) -> int:
@@ -293,13 +279,22 @@ def analyze_multitimeframe(ticker, db):
 
 
 
-def run_scanner(db: Session, market_regime_unused: str):
-    global_regime = get_global_regime_cached()
+def run_scanner(db: Session, market_regime_unused: str = None):
+    """
+    Основная логика сканера.
+    Аргумент market_regime_unused оставлен для совместимости сигнатуры, 
+    но мы будем брать актуальный режим из Redis.
+    """
+    # 1. Получаем режим рынка из Redis (быстро и надежно)
+    global_regime = get_market_regime_cached()
+    
     if global_regime == "Extreme_Volatility":
+        print("SCANNER: Экстремальная волатильность. Сканирование пропущено.")
         return 0
 
     tickers_rows = db.execute(text("SELECT DISTINCT ticker FROM forecasts")).fetchall()
     metrics = db.execute(text("SELECT ticker, backtest_metrics FROM forecast_metrics")).fetchall()
+    
     wr_map = {}
     for t, m_json in metrics:
         if m_json:
@@ -311,6 +306,7 @@ def run_scanner(db: Session, market_regime_unused: str):
     for row in tickers_rows:
         ticker = row[0]
         wr = wr_map.get(ticker, 0.0)
+        # Фильтр по качеству модели
         if wr < 40.0:
             continue
 
@@ -318,25 +314,30 @@ def run_scanner(db: Session, market_regime_unused: str):
         if not figi:
             continue
 
+        # Получаем прогноз
         fc_data = db.execute(
             text(
                 "SELECT forecast_date, forecast_value, upper_bound, lower_bound FROM forecasts WHERE ticker = :ticker ORDER BY forecast_date LIMIT 15"
             ),
             {"ticker": ticker},
         ).fetchall()
+        
         if len(fc_data) < 14:
             continue
         fc_df = pd.DataFrame(fc_data, columns=["forecast_date", "forecast_value", "upper_bound", "lower_bound"])
 
+        # Получаем историю
         hist = get_historical_data(figi, days=60)
         if hist.empty:
             continue
         curr_price = hist.iloc[-1]["close"]
 
+        # Получаем стакан
         ob = get_order_book(figi)
         if not check_liquidity_and_spread(ob):
             continue
 
+        # Получаем уровни
         lvl_data = db.execute(
             text("SELECT start_price, end_price, level_type, intensity FROM key_levels WHERE ticker = :ticker"),
             {"ticker": ticker},
@@ -347,6 +348,7 @@ def run_scanner(db: Session, market_regime_unused: str):
             else pd.DataFrame()
         )
 
+        # Ищем паттерны
         sigs = find_patterns(ticker, curr_price, fc_df, lvl_df, ob)
 
         if sigs:
@@ -354,6 +356,7 @@ def run_scanner(db: Session, market_regime_unused: str):
 
     final = []
 
+    # Фильтруем сигналы по глобальному режиму
     for ticker, item in raw_signals.items():
         allowed_direction = "BOTH"
         if global_regime == "Bullish":
@@ -372,19 +375,20 @@ def run_scanner(db: Session, market_regime_unused: str):
 
         best = sorted(valid_sigs, key=lambda s: s["potential_profit_pct"], reverse=True)[0]
 
+        # Мета-модель (AI валидация сигнала)
         meta_feats = prepare_meta_features(ticker, item["hist"], item["fc"], global_regime)
         meta_result = {"score": 0.5, "explanation": []}
 
         if meta_feats:
             meta_result = get_meta_prediction_with_shap(meta_feats)
-            meta_score = meta_result["score"]
-            ai_reasoning = meta_result["explanation"]
-
+            
         meta_score = meta_result["score"]
+        ai_reasoning = meta_result["explanation"]
 
         if meta_score < ROBUST_FACTOR:
             continue
 
+        # Расчет размера позиции (множитель)
         size_mult = 1.0
         if meta_score > 0.8:
             size_mult = 1.5
@@ -401,15 +405,17 @@ def run_scanner(db: Session, market_regime_unused: str):
         best["details"]["position_size_mult"] = round(size_mult, 2)
         best["details"]["ai_reasoning"] = ai_reasoning  
 
+        # Приоритет = Score * Profit
         priority_score = meta_score * best["potential_profit_pct"]
         best["_priority"] = priority_score
 
         final.append({**best, "ticker": ticker})
 
+    # Сортируем и берем топ-20
     final.sort(key=lambda x: x["_priority"], reverse=True)
-
     final_top = final[:20]
 
+    # Сохраняем в БД
     try:
         db.execute(text("DELETE FROM trading_signals WHERE generated_at < NOW() - INTERVAL '2 days'"))
         for s in final_top:
@@ -436,7 +442,8 @@ def run_scanner(db: Session, market_regime_unused: str):
                 },
             )
         db.commit()
-    except Exception:
+    except Exception as e:
         db.rollback()
+        print(f"Error saving signals: {e}")
 
     return len(final_top)

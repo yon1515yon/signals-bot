@@ -3,17 +3,20 @@ from __future__ import annotations
 import pandas as pd
 from celery.utils.log import get_task_logger
 
+from app.core.cache import redis_client
 from app.services.services import find_imoex_future_figi, get_historical_data
 
 logger = get_task_logger(__name__)
 
-_market_regime_cache = {"regime": "Neutral", "timestamp": pd.Timestamp(0, tz="UTC")}
+CACHE_KEY_REGIME = "global_market_regime"
+CACHE_TTL_SECONDS = 3600 
 
 
 def get_global_market_regime() -> str:
     """
     Determines global market regime (Risk-On / Risk-Off) using IMOEX index.
     Returns: 'Bullish', 'Bearish', 'Neutral', 'Extreme_Volatility'
+    Calculates purely from fresh data (Heavy operation).
     """
     try:
         figi = find_imoex_future_figi()
@@ -53,38 +56,34 @@ def get_global_market_regime() -> str:
         return "Neutral"
 
     except Exception as e:
-        print(f"Market Regime Error: {e}")
+        logger.error(f"Market Regime Calculation Error: {e}")
         return "Neutral"
 
 
-def get_market_regime_cached(db_session, services, cache_duration_minutes=60):
+def get_market_regime_cached(db_session=None, services=None) -> str:
     """
-    Returns market state using in-memory cache.
+    Returns market state using REDIS cache.
+    Arguments db_session and services are kept for backward compatibility but unused.
     """
-    global _market_regime_cache
-    now = pd.Timestamp.now(tz="UTC")
+    try:
+        # 1. Пытаемся получить значение из Redis
+        cached_regime = redis_client.get(CACHE_KEY_REGIME)
+        
+        if cached_regime:
+            logger.info(f"MARKET REGIME: Взято из кэша Redis ({cached_regime})")
+            return cached_regime
 
-    if (now - _market_regime_cache["timestamp"]).total_seconds() > cache_duration_minutes * 60:
-        logger.info("MARKET REGIME: Кэш устарел, обновляю состояние рынка...")
+        # 2. Если в кэше нет, считаем заново (Тяжелая операция)
+        logger.info("MARKET REGIME: Кэш пуст или устарел, обновляю состояние рынка...")
+        regime = get_global_market_regime()
 
-        try:
-            market_index_figi = services.find_imoex_future_figi()
-            if not market_index_figi:
-                raise ValueError("Не удалось найти FIGI для фьючерса на IMOEX.")
-            index_data = services.get_historical_data(figi=market_index_figi, days=90)
+        # 3. Сохраняем в Redis с TTL
+        redis_client.set(CACHE_KEY_REGIME, regime, ex=CACHE_TTL_SECONDS)
+        logger.warning(f"MARKET REGIME: Новый режим рынка: {regime} (сохранен в Redis)")
+        
+        return regime
 
-            if index_data.empty:
-                logger.warning("MARKET REGIME WARNING: Не удалось получить данные по фьючерсу IMOEX. Режим 'Neutral'.")
-                regime = "Neutral"
-            else:
-                regime = get_global_market_regime(index_data)
-
-        except Exception as e:
-            logger.error(f"MARKET REGIME ERROR: Ошибка при получении данных по индексу: {e}. Режим 'Neutral'.")
-            regime = "Neutral"
-
-        _market_regime_cache["regime"] = regime
-        _market_regime_cache["timestamp"] = now
-        logger.warning(f"MARKET REGIME: Новый режим рынка: {regime}")
-
-    return _market_regime_cache["regime"]
+    except Exception as e:
+        logger.error(f"Redis Error in get_market_regime_cached: {e}")
+        # Fallback: если Redis упал, просто считаем напрямую, не кэшируя
+        return get_global_market_regime()

@@ -53,7 +53,7 @@ services:
   worker_light:
     build: .
     restart: always
-    command: celery -A app.worker.tasks.celery_app worker --loglevel=info -Q default --concurrency=4 --hostname=light@%h
+    command: celery -A app.core.celery_app worker --loglevel=info -Q default --concurrency=4 --hostname=light@%h
     env_file: .env
     volumes:
       - ./app:/app/app
@@ -65,7 +65,7 @@ services:
   worker_heavy:
     build: .
     restart: always
-    command: celery -A app.worker.tasks.celery_app worker --loglevel=info -Q ml_training --concurrency=1 --hostname=heavy@%h
+    command: celery -A app.core.celery_app worker --loglevel=info -Q ml_training --concurrency=1 --hostname=heavy@%h
     env_file: .env
     volumes:
       - ./app:/app/app
@@ -78,7 +78,7 @@ services:
   beat:
     build: .
     restart: always
-    command: celery -A app.worker.tasks.celery_app beat --loglevel=info
+    command: celery -A app.core.celery_app beat --loglevel=info
     env_file: .env
     volumes:
       - ./app:/app/app
@@ -97,6 +97,16 @@ services:
     depends_on:
       api:
         condition: service_started
+  worker_nlp:
+    build: .
+    command: celery -A app.core.celery_app worker -Q nlp_queue --concurrency=1 --hostname=nlp@%h
+    env_file: .env
+    volumes:
+      - ./app:/app/app
+      - hf_cache:/app/hf_cache
+    depends_on:
+      redis:
+        condition: service_healthy
 
 volumes:
   postgres_data:

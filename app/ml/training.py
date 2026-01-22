@@ -2,11 +2,14 @@ from __future__ import annotations
 import json
 import os
 import warnings
-
+import mlflow
+import mlflow.pytorch
 import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
+import structlog
+
 from app.ml.backtest_engine import run_backtrader_wfa 
 from app.services.services import get_combined_macro_data, get_cross_asset_data, get_historical_data
 from celery.utils.log import get_task_logger
@@ -24,15 +27,23 @@ from app.constants import (
 )  
 from app.ml.architecture import DrawdownLSTMModel, FocalLoss, LSTMTransformerModel
 from app.ml.prediction import predict_with_uncertainty
+from app.ml.validation import validate_stock_data 
 
+mlflow.set_tracking_uri(os.getenv("MLFLOW_TRACKING_URI", "file:///app/mlruns"))
 warnings.filterwarnings("ignore")
-logger = get_task_logger(__name__)
+logger = structlog.get_logger()
 
 GLOBAL_MODEL_PATH = f"{settings.MODEL_STORAGE_PATH}/GLOBAL_BASE_MODEL.pth"
 
 
 def prepare_features_and_scale(stock_data: pd.DataFrame):
     """Подготовка фичей и нормализация данных."""
+    try:
+        df = validate_stock_data(df)
+    except ValueError as e:
+        print(f"Validation Error: {e}")
+        return None, None, None, None, None
+    
     try:
         stock_data.ta.rsi(length=14, append=True)
         stock_data.ta.macd(fast=12, slow=26, signal=9, append=True)
@@ -176,140 +187,88 @@ def train_global_base_model(tickers_list: list, figi_map: dict):
     logger.warning(f"GLOBAL MODEL: Сохранена в {GLOBAL_MODEL_PATH}")
 
 
-def train_and_predict_lstm(stock_data: pd.DataFrame, ticker: str, future_predictions: int = 30):
-    """Fine-tuning модели для конкретного тикера и прогноз."""
-    current_config = ML_CONFIG.copy()
-    params_path = f"{settings.MODEL_STORAGE_PATH}/{ticker}_params.json"
-    if os.path.exists(params_path):
-        try:
-            with open(params_path, "r") as f:
-                tuned_params = json.load(f)
-            if "hidden_size" in tuned_params:
-                current_config["HIDDEN_SIZE"] = tuned_params["hidden_size"]
-            if "num_layers" in tuned_params:
-                current_config["NUM_LAYERS"] = tuned_params["num_layers"]
-            if "dropout" in tuned_params:
-                current_config["DROPOUT"] = tuned_params["dropout"]
+def train_and_predict_lstm(
+    stock_data: pd.DataFrame, 
+    ticker: str, 
+    future_predictions: int = 30
+):
+    log = logger.bind(ticker=ticker)
+    log.info("Starting LSTM training", data_len=len(stock_data))
+    # 1. Подготовка
+    processed_df, data_norm, scaler, feats, outs = prepare_features_and_scale(stock_data)
+    if data_norm is None:
+        return None, None, None, None, None, None, None, None
 
-            logger.info(f"[{ticker}] Используются оптимизированные параметры Optuna")
-        except Exception as e:
-            logger.error(f"Ошибка загрузки params.json: {e}")
-    days_history = (stock_data["time"].max() - stock_data["time"].min()).days + 90
-    macro_data = get_combined_macro_data()
-    cross_asset_data = get_cross_asset_data(days=days_history)
-
-    stock_data["time_date"] = stock_data["time"].dt.normalize()
-    if not cross_asset_data.empty:
-        stock_data = pd.merge_asof(
-            stock_data.sort_values("time_date"),
-            cross_asset_data,
-            left_on="time_date",
-            right_on="time",
-            direction="backward",
-        )
-    if not macro_data.empty:
-        stock_data = pd.merge_asof(
-            stock_data.sort_values("time_date"), macro_data, left_on="time_date", right_on="time", direction="backward"
-        )
-
-    stock_data.drop(
-        columns=[col for col in stock_data.columns if col.startswith("time_y") or col == "time_date"],
-        inplace=True,
-        errors="ignore",
-    )
-    stock_data.rename(columns={"time_x": "time"}, inplace=True, errors="ignore")
-    stock_data = stock_data.ffill().bfill()
-
-    processed_data, data_normalized, scaler, feature_columns, output_columns = prepare_features_and_scale(stock_data)
-
-    if data_normalized is None:
-        return None, None, [], [], [], {}, None, {}
-
+    input_size = len(feats)
+    output_size = len(outs)
+    
+    # Подготовка тензоров (Sliding Window)
+    X, y = [], []
     train_window = ML_CONFIG["TRAIN_WINDOW"]
-    output_indices = [feature_columns.index(col) for col in output_columns]
-    X_all, y_all = [], []
-    for i in range(len(data_normalized) - train_window):
-        X_all.append(data_normalized[i : i + train_window])
-        y_all.append(data_normalized[i + train_window, output_indices])
-
-    full_dataset = TensorDataset(torch.FloatTensor(np.array(X_all)), torch.FloatTensor(np.array(y_all)))
-    loader = DataLoader(full_dataset, batch_size=ML_CONFIG["BATCH_SIZE_FINE_TUNE"], shuffle=False)
-
+    
+    for i in range(len(data_norm) - train_window):
+        X.append(data_norm[i : i + train_window])
+        # Предсказываем следующее значение (или вектор значений)
+        output_indices = [feats.index(c) for c in outs]
+        y.append(data_norm[i + train_window, output_indices])
+        
+    X_tensor = torch.FloatTensor(np.array(X))
+    y_tensor = torch.FloatTensor(np.array(y))
+    
+    # DataLoader
+    dataset = TensorDataset(X_tensor, y_tensor)
+    loader = DataLoader(dataset, batch_size=ML_CONFIG["BATCH_SIZE_GLOBAL"], shuffle=True)
+    
+    # Инициализация модели
     model = LSTMTransformerModel(
-        input_size=len(feature_columns),
-        hidden_size=current_config["HIDDEN_SIZE"],
-        num_layers=current_config["NUM_LAYERS"],
+        input_size=input_size,
+        hidden_size=ML_CONFIG["HIDDEN_SIZE"],
+        num_layers=ML_CONFIG["NUM_LAYERS"],
         n_head=ML_CONFIG["N_HEAD"],
-        dropout=current_config["DROPOUT"],
-        output_size=len(output_columns),
+        dropout=ML_CONFIG["DROPOUT"],
+        output_size=output_size
     )
-    params_path = f"{settings.MODEL_STORAGE_PATH}/{ticker}_params.json"
+    
+    optimizer = torch.optim.Adam(model.parameters(), lr=ML_CONFIG["LEARNING_RATE_GLOBAL"])
+    criterion = FocalLoss(gamma=ML_CONFIG["FOCAL_LOSS_GAMMA"])
 
-    if os.path.exists(GLOBAL_MODEL_PATH):
-        logger.info(f"[{ticker}] Transfer Learning: Загрузка весов...")
-        try:
-            model.load_state_dict(torch.load(GLOBAL_MODEL_PATH))
-            learning_rate = ML_CONFIG["LEARNING_RATE_TRANSFER"]
-            epochs = ML_CONFIG["EPOCHS_TRANSFER"]
-        except Exception as e:
-            logger.error(f"[{ticker}] Ошибка загрузки глобальной модели: {e}")
-            learning_rate = ML_CONFIG["LEARNING_RATE_FINE_TUNE"]
-            epochs = ML_CONFIG["EPOCHS_FINE_TUNE"]
-    else:
-        learning_rate = ML_CONFIG["LEARNING_RATE_FINE_TUNE"]
-        epochs = ML_CONFIG["EPOCHS_FINE_TUNE"]
+    mlflow.set_experiment(f"Crypto_Forecast_{ticker}")
+    
+    with mlflow.start_run(run_name=f"Train_{ticker}_{pd.Timestamp.now().isoformat()}"):
+        mlflow.log_params(ML_CONFIG)
+        mlflow.log_param("features_count", input_size)
+        mlflow.log_param("train_size", len(X))
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
-    loss_fn = FocalLoss(gamma=ML_CONFIG["FOCAL_LOSS_GAMMA"], weights=ML_CONFIG["FOCAL_LOSS_WEIGHTS"])
+        model.train()
+        for epoch in range(ML_CONFIG["EPOCHS_GLOBAL"]):
+            epoch_loss = 0.0
+            for X_batch, y_batch in loader:
+                optimizer.zero_grad()
+                preds = model(X_batch)
+                loss = criterion(preds, y_batch)
+                loss.backward()
+                optimizer.step()
+                epoch_loss += loss.item()
+            
+            avg_loss = epoch_loss / len(loader)
+            # Логируем метрику
+            mlflow.log_metric("loss", avg_loss, step=epoch)
+            log.info("Epoch finished", epoch=epoch, loss=round(avg_loss, 5))
 
-    model.train()
-    for _ in range(epochs):
-        for X, y in loader:
-            optimizer.zero_grad()
-            pred = model(X)
-            loss = loss_fn(pred, y)
-            loss.backward()
-            optimizer.step()
-    try:
-        train_size_simple = int(len(processed_data) * 0.9)
-        train_df = processed_data.iloc[:train_size_simple]
-        prophet_train_df = train_df.reset_index().rename(columns={"time": "ds", "close": "y"})
-        prophet_train_df["ds"] = prophet_train_df["ds"].dt.tz_localize(None)
-        m = Prophet(daily_seasonality=True)
-        m.fit(prophet_train_df)
-        future = m.make_future_dataframe(periods=future_predictions)
-        prophet_preds = m.predict(future)["yhat"].tail(future_predictions).values
-    except Exception:
-        prophet_preds = np.full(future_predictions, processed_data["close"].iloc[-1])
+        mlflow.pytorch.log_model(model, "model")
+        log.info("Training completed", model="LSTM_Transformer")
+        scaler_path = "scaler.pkl"
+        joblib.dump(scaler, scaler_path)
+        mlflow.log_artifact(scaler_path)
+        if os.path.exists(scaler_path): os.remove(scaler_path)
 
-    try:
-        arima_model = ARIMA(processed_data["close"], order=(5, 1, 0)).fit()
-        arima_preds = arima_model.forecast(steps=future_predictions).values
-    except Exception:
-        arima_preds = np.full(future_predictions, processed_data["close"].iloc[-1])
 
-    mean_lstm, upper_raw, lower_raw = predict_with_uncertainty(
-        model,
-        scaler,
-        data_normalized[-train_window:],
-        processed_data,
-        feature_columns,
-        output_columns,
-        future_predictions,
+    last_sequence = data_norm[-train_window:]
+    mean_preds, upper, lower = predict_with_uncertainty(
+        model, scaler, last_sequence, processed_df, feats, outs, future_predictions
     )
-
-    w_lstm, w_prophet, w_arima = 0.6, 0.2, 0.2
-    ensemble_preds = (mean_lstm * w_lstm) + (prophet_preds * w_prophet) + (arima_preds * w_arima)
-
-    uncertainty = (upper_raw - lower_raw) / 2
-    final_upper = ensemble_preds + uncertainty
-    final_lower = ensemble_preds - uncertainty
-
-    final_preds = pd.Series(ensemble_preds).ewm(alpha=0.5).mean().values
-    final_upper = pd.Series(final_upper).ewm(alpha=0.5).mean().values
-    final_lower = pd.Series(final_lower).ewm(alpha=0.5).mean().values
-
-    return model, scaler, final_preds, final_upper, final_lower, {}, None, {}
+    
+    return model, scaler, mean_preds, upper, lower, {}, None, {}
 
 
 def train_drawdown_model(stock_data: pd.DataFrame, ticker: str):

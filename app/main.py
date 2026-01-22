@@ -1,41 +1,38 @@
 import logging
-
+from asgi_correlation_id import CorrelationIdMiddleware
+from app.core.logging import setup_logging
 from fastapi import FastAPI
 from prometheus_fastapi_instrumentator import Instrumentator
 
-# Импортируем роутер, куда мы перенесли все эндпоинты
 from app.api.routes import router
 
-# Импортируем настройки (если понадобится доступ к ним здесь, например для версионирования)
 from app.config import settings
 
-# Настройка базового логгера
+setup_logging()
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-# Создаем приложение FastAPI
 app = FastAPI(
-    title="NeuroVision API for Russian Stocks",
+    title="signals-bot API for Russian Stocks",
     description="AI-powered trading bot backend with ML forecasting and market analysis.",
     version="1.0.0",
     docs_url="/docs",
     redoc_url="/redoc",
 )
 
-# Подключаем основной роутер с префиксом (опционально, можно без prefix)
-# Это делает API доступным по путям /api/v1/tickers и т.д., или просто /tickers
+app.add_middleware(CorrelationIdMiddleware)
+
 app.include_router(router)
 
-# Подключаем метрики Prometheus для мониторинга
 Instrumentator().instrument(app).expose(app)
 
 
 @app.on_event("startup")
 async def on_startup():
     """Действия при запуске приложения."""
-    logger.info("NeuroVision API is starting up...")
-    # Здесь можно добавить проверку соединения с Redis или БД,
-    # но SQLAlchemy и Celery обычно делают это лениво.
+    logger.info("signals-bot API is starting up...")
+
 
 
 @app.get("/health", tags=["System"], summary="Проверка работоспособности")
@@ -50,4 +47,4 @@ async def health_check():
 @app.get("/", tags=["System"])
 async def root():
     """Корневой эндпоинт с приветствием."""
-    return {"message": "Welcome to NeuroVision API!", "documentation": "/docs", "version": "1.0.0"}
+    return {"message": "Welcome to signals-bot API!", "documentation": "/docs", "version": "1.0.0"}

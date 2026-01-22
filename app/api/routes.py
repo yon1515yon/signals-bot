@@ -1,42 +1,33 @@
-# Файл: app/api/routes.py
-
-import logging
+from io import BytesIO
 from datetime import date, datetime, timedelta
 from typing import List
 
 import pandas as pd
-
-# Сервисы
-from app.services.services import get_historical_data
+import structlog
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
-# Схемы Pydantic
-from app import schemas
-
-# Конфигурация
+# Сервисы и утилиты
+from app.services.services import get_historical_data
+from app.services.portfolio_service import PortfolioService
 from app.core import plotting
 from app.core.sizing import calculate_fixed_risk_position_size, calculate_kelly_criterion_position_size
-
-# Бизнес-логика (Core)
 from app.core.stoploss import get_stop_loss_suggestions
-from app.db import models
-
-#   Импорты из модулей приложения
-# База данных
-from app.db.database import SessionLocal
 
 # ML
 from app.ml.training import train_and_predict_lstm
-from app.services.portfolio_service import PortfolioService
 
-# Настройка логгера для этого модуля
-logger = logging.getLogger(__name__)
+# БД и Схемы
+from app.db import models
+from app.db.database import SessionLocal
+from app import schemas
 
-# Создаем роутер вместо app
+# Настройка логгера
+logger = structlog.get_logger()
+
 router = APIRouter()
-
 
 # Dependency: Получение сессии БД
 def get_db():
@@ -49,6 +40,73 @@ def get_db():
 
 # Эндпоинты: Аналитика и Данные
 
+def _generate_forecast_logic(ticker: str, figi: str) -> BytesIO:
+    """
+    Синхронная функция, выполняющая тяжелые вычисления:
+    1. Загрузка данных (Network I/O)
+    2. ML Инференс (CPU Bound)
+    3. Генерация графика Matplotlib (CPU Bound)
+    """
+    log = logger.bind(ticker=ticker, task="plot_generation")
+    log.info("Starting forecast plot generation")
+
+    # 1. Загрузка данных
+    historical_data = get_historical_data(figi, days=365 * 5)
+
+    if historical_data.empty or len(historical_data) < 252:
+        log.warning("Insufficient data", rows=len(historical_data))
+        raise ValueError("Недостаточно исторических данных для анализа.")
+
+    # 2. ML Инференс
+    try:
+        (
+            model,
+            scaler,
+            final_predictions,
+            final_upper_bound,
+            final_lower_bound,
+            profitability_metrics,
+            bear_scenario_preds,
+            multi_horizon_forecasts,
+        ) = train_and_predict_lstm(stock_data=historical_data.copy(), ticker=ticker, future_predictions=30)
+
+        if final_predictions is None or len(final_predictions) == 0:
+            raise ValueError("ML модель вернула пустой прогноз.")
+
+    except Exception as e:
+        log.error("ML Pipeline failed", error=str(e))
+        raise RuntimeError(f"Ошибка ML модели: {e}")
+
+    # 3. Подготовка данных для графика
+    last_date = historical_data["time"].iloc[-1]
+    if isinstance(last_date, pd.Timestamp) or isinstance(last_date, datetime):
+        last_date = last_date.date()
+    
+    forecast_dates = pd.to_datetime(
+        pd.date_range(start=last_date + timedelta(days=1), periods=30)
+    )
+    forecast_df = pd.DataFrame({"forecast_date": forecast_dates, "forecast_value": final_predictions})
+
+    # 4. Отрисовка (Matplotlib)
+    try:
+        image_buffer = plotting.plot_forecast(
+            historical_data=historical_data,
+            forecast_data=forecast_df,
+            upper_bound=final_upper_bound,
+            lower_bound=final_lower_bound,
+            ticker=ticker,
+            bear_scenario=bear_scenario_preds,
+        )
+        log.info("Plot generated successfully")
+        return image_buffer
+    except Exception as e:
+        log.error("Plotting failed", error=str(e))
+        raise RuntimeError("Ошибка при генерации изображения.")
+
+
+# --- ЭНДПОИНТЫ ---
+
+# 1. Аналитика и Данные
 
 @router.get("/tickers", response_model=List[schemas.TickerResponse], summary="Получить список отслеживаемых акций")
 def get_tracked_tickers(db: Session = Depends(get_db)):
@@ -56,17 +114,16 @@ def get_tracked_tickers(db: Session = Depends(get_db)):
     return tickers
 
 
-@router.get("/forecast/{ticker}", response_model=List[schemas.ForecastResponse], summary="Получить прогноз для тикера")
+@router.get("/forecast/{ticker}", response_model=List[schemas.ForecastResponse])
 def get_forecast(ticker: str, db: Session = Depends(get_db)):
-    forecasts = (
-        db.query(models.Forecast)
-        .filter(models.Forecast.ticker == ticker.upper())
-        .order_by(models.Forecast.forecast_date)
-        .all()
-    )
+    log = logger.bind(ticker=ticker) 
+    
+    forecasts = db.query(models.Forecast).filter(models.Forecast.ticker == ticker.upper()).order_by(models.Forecast.forecast_date).all()
     if not forecasts:
+        log.info("Forecast not found in DB")
         raise HTTPException(status_code=404, detail="Прогноз не найден.")
     return forecasts
+
 
 
 @router.get("/levels/{ticker}", response_model=List[schemas.KeyLevelZoneResponse], summary="Получить ключевые уровни")
@@ -164,23 +221,37 @@ def get_intraday_signals(db: Session = Depends(get_db)):
     return signals
 
 
-@router.post("/feedback", status_code=201, summary="Отправить отзыв на сигнал")
+@router.post("/feedback", status_code=201)
 def post_feedback(feedback: schemas.FeedbackIn, db: Session = Depends(get_db)):
-    db_signal = db.query(models.TradingSignal).filter(models.TradingSignal.id == feedback.signal_id).first()
-    if not db_signal:
-        raise HTTPException(status_code=404, detail="Сигнал не найден")
-
-    db_feedback = (
-        db.query(models.SignalFeedback).filter_by(signal_id=feedback.signal_id, user_id=feedback.user_id).first()
+    log = logger.bind(
+        signal_id=feedback.signal_id, 
+        user_id=feedback.user_id, 
+        reaction=feedback.reaction
     )
-    if db_feedback:
-        db_feedback.reaction = feedback.reaction
-    else:
-        db_feedback = models.SignalFeedback(**feedback.dict())
-        db.add(db_feedback)
+    
+    try:
+        db_signal = db.query(models.TradingSignal).filter(models.TradingSignal.id == feedback.signal_id).first()
+        if not db_signal:
+            log.warning("Signal not found for feedback")
+            raise HTTPException(status_code=404, detail="Сигнал не найден")
 
-    db.commit()
-    return {"status": "success", "message": "Отзыв сохранен."}
+        db_feedback = db.query(models.SignalFeedback).filter_by(
+            signal_id=feedback.signal_id, user_id=feedback.user_id
+        ).first()
+
+        if db_feedback:
+            log.info("Updating existing feedback")
+            db_feedback.reaction = feedback.reaction
+        else:
+            log.info("Creating new feedback")
+            db_feedback = models.SignalFeedback(**feedback.dict())
+            db.add(db_feedback)
+
+        db.commit()
+        return {"status": "success"}
+    except Exception as e:
+        log.error("Error saving feedback", error=str(e))
+        raise HTTPException(status_code=500, detail="Ошибка сохранения")
 
 
 @router.get("/stats", response_model=schemas.SignalStats, summary="Статистика сигналов")
@@ -209,12 +280,10 @@ def get_signal_stats(db: Session = Depends(get_db)):
     }
 
 
-#   Эндпоинты: Калькуляторы
-
+# 2. Калькуляторы
 
 @router.post("/position-size", summary="Калькулятор размера позиции (Фикс. риск)")
 def get_position_size(request: schemas.PositionSizeRequest, db: Session = Depends(get_db)):
-    # TODO:
     lot_size = 1
 
     result = calculate_fixed_risk_position_size(
@@ -257,8 +326,7 @@ def get_forecast_metrics(ticker: str, db: Session = Depends(get_db)):
     return metrics
 
 
-#   Эндпоинты: Портфолио
-
+# 3. Портфолио
 
 @router.post("/portfolio/create/{user_id}", summary="Создать портфель пользователя")
 def create_user_portfolio(user_id: int, db: Session = Depends(get_db)):
@@ -276,20 +344,34 @@ def get_my_portfolio(user_id: int, db: Session = Depends(get_db)):
     return portfolio
 
 
-class TradeRequest(schemas.PositionBase):
-    ticker: str
-    price: float
-    direction: str = "LONG"
-    amount: float = 50000
 
 
-@router.post("/portfolio/trade/{user_id}", summary="Совершить сделку")
-def execute_trade(user_id: int, req: TradeRequest, db: Session = Depends(get_db)):
-    svc = PortfolioService(db)
-    res = svc.open_position(user_id, req.ticker, req.price, req.direction, req.amount)
-    if "error" in res:
-        raise HTTPException(400, res["error"])
-    return res
+@router.post("/portfolio/trade/{user_id}")
+def execute_trade(user_id: int, req: schemas.LocalTradeRequest, db: Session = Depends(get_db)):
+    log = logger.bind(
+        user_id=user_id, 
+        ticker=req.ticker, 
+        direction=req.direction, 
+        amount=req.amount
+    )
+    
+    log.info("Trade request received")
+    
+    try:
+        svc = PortfolioService(db)
+        res = svc.open_position(user_id, req.ticker, req.price, req.direction, req.amount)
+
+        if "error" in res:
+            log.warning("Trade rejected by service", reason=res["error"])
+            raise HTTPException(400, res["error"])
+
+        log.info("Trade executed successfully")
+        return res
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.error("Critical trade execution error", exc_info=True)
+        raise HTTPException(500, "Internal Trade Error")
 
 
 @router.post("/portfolio/close/{user_id}/{position_id}", summary="Закрыть позицию")
@@ -328,60 +410,31 @@ def create_portfolio_crud(portfolio_data: schemas.PortfolioCreate, db: Session =
     }
 
 
-#   Эндпоинты: Графики и Подписка
+# 4. Графики и Подписка
 
-
-@router.get("/plots/forecast/{ticker}", summary="График прогноза")
-def get_forecast_plot(ticker: str, db: Session = Depends(get_db)):
-    ticker_upper = ticker.upper()
-    figi = db.query(models.TrackedTicker.figi).filter(models.TrackedTicker.ticker == ticker_upper).scalar()
+@router.get("/plots/forecast/{ticker}")
+async def get_forecast_plot_endpoint(ticker: str, db: Session = Depends(get_db)):
+    log = logger.bind(ticker=ticker)
+    
+    # Проверка тикера (легкая операция)
+    figi = db.query(models.TrackedTicker.figi).filter(models.TrackedTicker.ticker == ticker.upper()).scalar()
     if not figi:
-        raise HTTPException(status_code=404, detail="Тикер не найден.")
-
-    logger.info(f"[{ticker_upper}] Запрос графика. Загрузка истории...")
-    historical_data = get_historical_data(figi, days=365 * 5)
-
-    if historical_data.empty or len(historical_data) < 252:
-        raise HTTPException(status_code=404, detail="Недостаточно данных.")
+        log.warning("Ticker not tracked")
+        raise HTTPException(404, "Тикер не найден")
 
     try:
-        (
-            model,
-            scaler,
-            final_predictions,
-            final_upper_bound,
-            final_lower_bound,
-            profitability_metrics,
-            bear_scenario_preds,
-            multi_horizon_forecasts,
-        ) = train_and_predict_lstm(stock_data=historical_data.copy(), ticker=ticker_upper, future_predictions=30)
-
-        if final_predictions is None or len(final_predictions) == 0:
-            raise ValueError("ML модель вернула пустой прогноз.")
-
+        # Тяжелая операция в пуле потоков
+        buffer = await run_in_threadpool(_generate_forecast_logic, ticker.upper(), figi)
+        return StreamingResponse(buffer, media_type="image/png")
+    except RuntimeError as e:
+        # Лог уже записан внутри _generate_forecast_logic с уровнем ERROR
+        raise HTTPException(500, str(e))
+    except ValueError as e:
+        # Лог уже записан внутри _generate_forecast_logic с уровнем WARNING
+        raise HTTPException(404, str(e))
     except Exception as e:
-        logger.error(f"Ошибка ML пайплайна для графика {ticker_upper}: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Ошибка расчета: {e}")
-
-    forecast_dates = pd.to_datetime(
-        pd.date_range(start=historical_data["time"].iloc[-1].date() + timedelta(days=1), periods=30)
-    )
-    forecast_df = pd.DataFrame({"forecast_date": forecast_dates, "forecast_value": final_predictions})
-
-    try:
-        image_buffer = plotting.plot_forecast(
-            historical_data=historical_data,
-            forecast_data=forecast_df,
-            upper_bound=final_upper_bound,
-            lower_bound=final_lower_bound,
-            ticker=ticker_upper,
-            bear_scenario=bear_scenario_preds,
-        )
-    except Exception as e:
-        logger.error(f"Ошибка генерации картинки: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail="Ошибка отрисовки.")
-
-    return StreamingResponse(image_buffer, media_type="image/png")
+        log.error("Unknown error in plot endpoint", error=str(e))
+        raise HTTPException(500, "Server Error")
 
 
 @router.post("/subscribe", status_code=201, summary="Подписаться на уведомления")
@@ -410,3 +463,4 @@ def unsubscribe_user(subscriber_data: schemas.SubscriberCreate, db: Session = De
     db.delete(sub)
     db.commit()
     return {"status": "success", "message": "Подписка отменена."}
+

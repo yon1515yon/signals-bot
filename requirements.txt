@@ -1,5 +1,3 @@
-# Файл: requirements.txt
-
 fastapi
 uvicorn
 celery[redis]
@@ -37,3 +35,8 @@ pytest-asyncio
 pytest-mock
 pytest-cov
 pydantic-settings
+pandera
+mlflow
+structlog
+python-json-logger
+asgi-correlation-id
