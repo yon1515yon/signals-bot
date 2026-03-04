@@ -187,13 +187,13 @@ def get_trading_signals(show_all: bool = False, db: Session = Depends(get_db)):
 
 
 @router.get("/stoploss/{ticker}", response_model=List[schemas.StopLossSuggestion], summary="Рассчитать стоп-лосс")
-def calculate_stop_loss(ticker: str, entry_price: float, db: Session = Depends(get_db)):
+def calculate_stop_loss(ticker: str, entry_price: float, direction: str = "LONG", db: Session = Depends(get_db)):
     ticker_upper = ticker.upper()
     figi = db.query(models.TrackedTicker.figi).filter(models.TrackedTicker.ticker == ticker_upper).scalar()
     if not figi:
         raise HTTPException(status_code=404, detail="Тикер не найден.")
 
-    suggestions = get_stop_loss_suggestions(db, ticker_upper, figi, entry_price)
+    suggestions = get_stop_loss_suggestions(db, ticker_upper, figi, entry_price, direction)
     if not suggestions:
         raise HTTPException(status_code=404, detail="Не удалось рассчитать стоп-лосс (мало данных).")
     return suggestions
@@ -287,7 +287,7 @@ def get_position_size(request: schemas.PositionSizeRequest, db: Session = Depend
     lot_size = 1
 
     result = calculate_fixed_risk_position_size(
-        request.account_size, request.risk_percent, request.entry_price, request.stop_loss_price, lot_size
+        request.account_size, request.risk_percent, request.entry_price, request.stop_loss_price, lot_size, request.direction
     )
     if "error" in result:
         raise HTTPException(status_code=400, detail=result["error"])
@@ -311,7 +311,7 @@ def get_kelly_position_size(request: schemas.PositionSizeRequest, db: Session = 
     lot_size = 1
 
     result = calculate_kelly_criterion_position_size(
-        db, request.account_size, request.entry_price, request.stop_loss_price, strategy_name, lot_size
+        db, request.account_size, request.entry_price, request.stop_loss_price, strategy_name, lot_size, request.direction
     )
     if "error" in result:
         raise HTTPException(status_code=400, detail=result["error"])

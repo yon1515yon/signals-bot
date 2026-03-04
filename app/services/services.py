@@ -67,10 +67,10 @@ def _fetch_candles_internal(client: Client, figi: str, days: int, interval: Cand
             candles_data.append(
                 {
                     "time": candle.time,
-                    "open": float(f"{candle.open.units}.{candle.open.nano}"),
-                    "close": float(f"{candle.close.units}.{candle.close.nano}"),
-                    "high": float(f"{candle.high.units}.{candle.high.nano}"),
-                    "low": float(f"{candle.low.units}.{candle.low.nano}"),
+                    "open": float(candle.open.units) + float(candle.open.nano) / 1e9,
+                    "close": float(candle.close.units) + float(candle.close.nano) / 1e9,
+                    "high": float(candle.high.units) + float(candle.high.nano) / 1e9,
+                    "low": float(candle.low.units) + float(candle.low.nano) / 1e9,
                     "volume": candle.volume,
                 }
             )

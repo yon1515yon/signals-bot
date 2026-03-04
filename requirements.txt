@@ -17,13 +17,12 @@ sentencepiece
 python-telegram-bot
 pandas-ta
 alembic
-psycopg2-binary
 matplotlib
 scipy
 prophet
 statsmodels
-requests       
-xmltodict      
+requests
+xmltodict
 optuna
 xgboost
 backtrader

@@ -1,4 +1,4 @@
-import app.db.models  
+import app.db.models as models
 from sqlalchemy.orm import Session
 
 
@@ -8,17 +8,23 @@ def calculate_fixed_risk_position_size(
     entry_price: float,
     stop_loss_price: float,
     lot_size: int = 1, 
+    direction: str = "LONG",
 ) -> dict:
     """Рассчитывает размер позиции на основе фиксированного процента риска."""
 
-    if entry_price <= stop_loss_price:
-        return {"error": "Цена входа должна быть выше цены стоп-лосса."}
+    direction = (direction or "LONG").upper()
+    if direction not in {"LONG", "SHORT"}:
+        return {"error": "Invalid direction. Use LONG or SHORT."}
+    if direction == "LONG" and entry_price <= stop_loss_price:
+        return {"error": "For LONG, entry price must be above stop-loss price."}
+    if direction == "SHORT" and entry_price >= stop_loss_price:
+        return {"error": "For SHORT, stop-loss price must be above entry price."}
 
     # 1. Рассчитываем сумму риска в деньгах
     risk_amount = account_size * (risk_percent / 100.0)
 
     # 2. Рассчитываем риск на одну акцию
-    risk_per_share = entry_price - stop_loss_price
+    risk_per_share = abs(entry_price - stop_loss_price)
 
     # 3. Рассчитываем, сколько акций мы можем себе позволить купить
     num_shares = risk_amount / risk_per_share
@@ -27,9 +33,7 @@ def calculate_fixed_risk_position_size(
     num_lots = int(num_shares / lot_size)
 
     if num_lots == 0:
-        return {
-            "error": f"Риск слишком велик. С депозитом {account_size:,.2f} руб. и риском {risk_percent}% вы не можете позволить себе ни одного лота."
-        }
+        return {"error": f"Risk too high for account size {account_size:,.2f} and risk {risk_percent}%."}
 
     position_value = num_lots * lot_size * entry_price
 
@@ -48,14 +52,19 @@ def calculate_fixed_risk_position_size(
 
 
 def calculate_kelly_criterion_position_size(
-    db: Session, account_size: float, entry_price: float, stop_loss_price: float, strategy_name: str, lot_size: int = 1
+    db: Session, account_size: float, entry_price: float, stop_loss_price: float, strategy_name: str, lot_size: int = 1, direction: str = "LONG"
 ) -> dict:
     """
     Рассчитывает размер позиции, используя Критерий Келли, на основе
     исторической эффективности конкретной торговой стратегии.
     """
-    if entry_price <= stop_loss_price:
-        return {"error": "Цена входа должна быть выше цены стоп-лосса."}
+    direction = (direction or "LONG").upper()
+    if direction not in {"LONG", "SHORT"}:
+        return {"error": "Invalid direction. Use LONG or SHORT."}
+    if direction == "LONG" and entry_price <= stop_loss_price:
+        return {"error": "For LONG, entry price must be above stop-loss price."}
+    if direction == "SHORT" and entry_price >= stop_loss_price:
+        return {"error": "For SHORT, stop-loss price must be above entry price."}
 
     stats = (
         db.query(models.StrategyPerformance).filter(models.StrategyPerformance.strategy_name == strategy_name).first()
@@ -85,10 +94,10 @@ def calculate_kelly_criterion_position_size(
     num_lots = int(num_shares / lot_size)
 
     if num_lots == 0:
-        return {"error": "Даже по Келли ваш депозит слишком мал для покупки хотя бы одного лота."}
+        return {"error": "Deposit too small for at least one lot (Kelly)."}
 
     final_position_value = num_lots * lot_size * entry_price
-    risk_on_trade_value = (entry_price - stop_loss_price) * num_lots * lot_size
+    risk_on_trade_value = abs(entry_price - stop_loss_price) * num_lots * lot_size
     risk_on_trade_percent = (risk_on_trade_value / account_size) * 100
 
     return {

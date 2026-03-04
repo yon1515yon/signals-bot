@@ -1,6 +1,5 @@
-# Файл: app/intraday.py
 import pandas as pd
-
+import pandas_ta as ta 
 
 def determine_global_bias(daily_forecast_df: pd.DataFrame, current_price: float, sentiment_score: float) -> str:
     """Определяет глобальное настроение для акции (только Long, только Short, или ничего)."""

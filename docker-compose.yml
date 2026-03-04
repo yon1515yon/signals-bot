@@ -35,8 +35,10 @@ services:
   api:
     build: .
     restart: always
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
     env_file: .env
+    environment:
+      - HF_HOME=/app/hf_cache
     volumes:
       - ./app:/app/app 
       - models_data:/app/models_storage
@@ -55,6 +57,8 @@ services:
     restart: always
     command: celery -A app.core.celery_app worker --loglevel=info -Q default --concurrency=4 --hostname=light@%h
     env_file: .env
+    environment:
+      - HF_HOME=/app/hf_cache
     volumes:
       - ./app:/app/app
     depends_on:
@@ -67,9 +71,26 @@ services:
     restart: always
     command: celery -A app.core.celery_app worker --loglevel=info -Q ml_training --concurrency=1 --hostname=heavy@%h
     env_file: .env
+    environment:
+      - HF_HOME=/app/hf_cache
     volumes:
       - ./app:/app/app
       - models_data:/app/models_storage
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  # --- NLP Worker (FinBERT) ---
+  worker_nlp:
+    build: .
+    restart: always
+    command: celery -A app.core.celery_app worker --loglevel=info -Q nlp_queue --concurrency=1 --hostname=nlp@%h
+    env_file: .env
+    environment:
+      - HF_HOME=/app/hf_cache
+    volumes:
+      - ./app:/app/app
+      - hf_cache:/app/hf_cache
     depends_on:
       redis:
         condition: service_healthy
@@ -86,30 +107,8 @@ services:
       redis:
         condition: service_healthy
 
-  # --- Telegram Bot ---
-  bot:
-    build: .
-    restart: always
-    command: python -m app.services.bot
-    env_file: .env
-    volumes:
-      - ./app:/app/app
-    depends_on:
-      api:
-        condition: service_started
-  worker_nlp:
-    build: .
-    command: celery -A app.core.celery_app worker -Q nlp_queue --concurrency=1 --hostname=nlp@%h
-    env_file: .env
-    volumes:
-      - ./app:/app/app
-      - hf_cache:/app/hf_cache
-    depends_on:
-      redis:
-        condition: service_healthy
-
 volumes:
   postgres_data:
   redis_data:
-  models_data: # Общий том для хранения обученных моделей
-  hf_cache:    # Кэш для HuggingFace моделей (чтобы не качать каждый раз)
+  models_data: 
+  hf_cache:

@@ -3,18 +3,15 @@ import time
 from newsapi import NewsApiClient
 from transformers import pipeline, AutoTokenizer, AutoModelForSequenceClassification
 from datetime import date, timedelta
-import logging
 from app.config import settings  
-
-logging.basicConfig(level=logging.INFO)
-logging.getLogger("transformers").setLevel(logging.ERROR)
+import structlog
+logger = structlog.get_logger()
 
 
 
 sentiment_pipeline = None
 
-MODEL_CACHE_DIR = os.path.expanduser("~/.cache/huggingface/hub")
-
+MODEL_CACHE_DIR = os.getenv("HF_HOME", os.path.expanduser("~/.cache/huggingface/hub"))
 LOCK_FILE_PATH = os.path.join(MODEL_CACHE_DIR, '.finbert.lock')
 
 
@@ -29,25 +26,25 @@ def get_sentiment_pipeline():
 
     try:
         with open(LOCK_FILE_PATH, "x") as lock_file:
-            print(">>> Создан файловый замок. Начинаю загрузку модели FinBERT... Это может занять несколько минут.")
+            logger.info("Created lock file. Loading FinBERT model...")
 
             tokenizer = AutoTokenizer.from_pretrained("ProsusAI/finbert")
             model = AutoModelForSequenceClassification.from_pretrained("ProsusAI/finbert")
             sentiment_pipeline = pipeline("sentiment-analysis", model=model, tokenizer=tokenizer)
 
-            print(">>> Модель FinBERT успешно загружена.")
+            logger.info("FinBERT model loaded successfully.")
 
     except FileExistsError:
-        print(">>> Другой процесс уже загружает модель. Ожидаю завершения...")
+        logger.info("Waiting for other process to load model...")
         while os.path.exists(LOCK_FILE_PATH):
             time.sleep(5) 
-        print(">>> Замок снят. Загружаю модель с диска.")
+        logger.info("Lock released. Loading from disk.")
         tokenizer = AutoTokenizer.from_pretrained("ProsusAI/finbert")
         model = AutoModelForSequenceClassification.from_pretrained("ProsusAI/finbert")
         sentiment_pipeline = pipeline("sentiment-analysis", model=model, tokenizer=tokenizer)
 
     except Exception as e:
-        print(f"!!! Не удалось загрузить модель sentiment-analysis: {e}.")
+        logger.error(f"Failed to load sentiment model: {e}")
         if os.path.exists(LOCK_FILE_PATH):
             os.remove(LOCK_FILE_PATH) 
         return None
@@ -79,7 +76,7 @@ def get_sentiment_score(ticker: str, company_name: str) -> tuple[float | None, i
             q=query, language="ru,en", sort_by="relevancy", from_param=from_date, page_size=20
         )
     except Exception as e:
-        print(f"Ошибка при получении новостей для {ticker}: {e}")
+        logger.error(f"Error fetching news for {ticker}: {e}")
         return None, 0
 
     articles = all_articles.get("articles", [])

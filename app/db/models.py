@@ -69,13 +69,13 @@ class TradingSignal(Base):
     __tablename__ = "trading_signals"
 
     id = Column(Integer, primary_key=True)
-    ticker = Column(String(10), unique=True, nullable=False, index=True)
+    ticker = Column(String(10), nullable=False, index=True)
     signal_type = Column(String(50), nullable=False)
     potential_profit_pct = Column(Float)
     forecast_days = Column(Integer)
     details = Column(JSONB)  
     generated_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)
-
+    __table_args__ = (UniqueConstraint("ticker", "generated_at", name="_ticker_signal_time_uc"),)
 
 class DarkPoolSignal(Base):
     __tablename__ = "dark_pool_signals"

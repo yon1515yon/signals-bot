@@ -3,6 +3,7 @@ import torch
 import joblib
 import structlog
 import pandas as pd 
+from datetime import datetime
 from sqlalchemy import text, delete
 from sqlalchemy.dialects.postgresql import insert 
 
@@ -20,7 +21,8 @@ from app.ml.loader import load_model, load_scaler, clear_model_cache
 from app.ml.training import (
     train_and_predict_lstm, 
     train_global_base_model, 
-    train_drawdown_model
+    train_drawdown_model,
+    prepare_features_and_scale
 )
 from app.ml.prediction import predict_with_uncertainty
 from app.ml.meta_model import train_meta_model

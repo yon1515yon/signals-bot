@@ -1,35 +1,29 @@
-# Файл: app/schemas.py
-
 from datetime import date, datetime
-from typing import Any, List
-
+from typing import Any, List, Optional
 from pydantic import BaseModel
 
 # --- Схемы для базовой аналитики ---
 
-
 class TickerResponse(BaseModel):
     ticker: str
     name: str
-    sentiment_score: float | None
-    risk_score: int | None
-    global_bias: str | None
-    last_updated_at: datetime | None
+    sentiment_score: Optional[float] = None
+    risk_score: Optional[int] = None
+    global_bias: Optional[str] = None
+    last_updated_at: Optional[datetime] = None
 
     class Config:
         from_attributes = True
-
 
 class ForecastResponse(BaseModel):
     ticker: str
     forecast_date: date
     forecast_value: float
-    upper_bound: float | None
-    lower_bound: float | None
+    upper_bound: Optional[float] = None
+    lower_bound: Optional[float] = None
 
     class Config:
         from_attributes = True
-
 
 class KeyLevelZoneResponse(BaseModel):
     ticker: str
@@ -40,7 +34,6 @@ class KeyLevelZoneResponse(BaseModel):
 
     class Config:
         from_attributes = True
-
 
 class SignalResponse(BaseModel):
     id: int
@@ -56,7 +49,6 @@ class SignalResponse(BaseModel):
     class Config:
         from_attributes = True
 
-
 class DarkPoolSignalResponse(BaseModel):
     ticker: str
     signal_time: datetime
@@ -67,24 +59,21 @@ class DarkPoolSignalResponse(BaseModel):
     class Config:
         from_attributes = True
 
-
 class IntradaySignalResponse(BaseModel):
     ticker: str
     signal_type: str
     entry_price: float
-    stop_loss: float | None
-    take_profit: float | None
+    stop_loss: Optional[float] = None
+    take_profit: Optional[float] = None
     strategy: str
-    global_bias: str | None
+    global_bias: Optional[str] = None
     generated_at: datetime
-    context_score: int | None
+    context_score: Optional[int] = None
 
     class Config:
         from_attributes = True
 
-
 # --- Схемы для калькуляторов ---
-
 
 class StopLossSuggestion(BaseModel):
     method: str
@@ -92,23 +81,20 @@ class StopLossSuggestion(BaseModel):
     risk_percent: float
     description: str
 
-
 class PositionSizeRequest(BaseModel):
     ticker: str
     entry_price: float
     stop_loss_price: float
+    direction: str = "LONG"
     account_size: float
     risk_percent: float = 1.0
 
-
 # --- Схемы для фидбэка и статистики ---
-
 
 class FeedbackIn(BaseModel):
     signal_id: int
     user_id: int
     reaction: str
-
 
 class SignalStats(BaseModel):
     total_signals: int
@@ -117,9 +103,7 @@ class SignalStats(BaseModel):
     breakeven_count: int
     success_rate: float
 
-
 # --- Схемы для портфолио ---
-
 
 class PositionBase(BaseModel):
     ticker: str
@@ -127,14 +111,11 @@ class PositionBase(BaseModel):
     entry_price: float
     size_shares: int
 
-
 class PositionCreate(PositionBase):
     portfolio_id: int
 
-
 class PositionClose(BaseModel):
     exit_price: float
-
 
 class PositionResponse(BaseModel):
     id: int
@@ -143,18 +124,16 @@ class PositionResponse(BaseModel):
     size_shares: int
     status: str
     entry_date: datetime
-    current_price: float | None = None
-    unrealized_pnl: float | None = None
+    current_price: Optional[float] = None
+    unrealized_pnl: Optional[float] = None
 
     class Config:
         from_attributes = True
-
 
 class PortfolioCreate(BaseModel):
     user_id: int
     name: str = "My Portfolio"
     initial_capital: float
-
 
 class PortfolioResponse(BaseModel):
     id: int
@@ -168,22 +147,27 @@ class PortfolioResponse(BaseModel):
     class Config:
         from_attributes = True
 
-
 class SubscriberCreate(BaseModel):
     user_id: int
-    username: str | None = None
-
+    username: Optional[str] = None
 
 class ForecastMetricsResponse(BaseModel):
     ticker: str
-    backtest_metrics: dict | None
-    multi_horizon_forecast: dict | None
+    backtest_metrics: Optional[dict] = None
+    multi_horizon_forecast: Optional[dict] = None
     last_calculated_at: datetime
 
     class Config:
         from_attributes = True
 
-class LocalTradeRequest(schemas.PositionBase):
+class TradeRequest(BaseModel):
+    ticker: str
+    price: float
+    direction: str = "LONG"
+    amount: float = 50000
+
+# Исправлено: наследование от PositionBase напрямую, без префикса schemas.
+class LocalTradeRequest(PositionBase):
     ticker: str
     price: float
     direction: str = "LONG"

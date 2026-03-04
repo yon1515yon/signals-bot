@@ -1,7 +1,7 @@
 import json
 import structlog
 import pandas as pd
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from sqlalchemy import text, select, delete, and_
 from sqlalchemy.dialects.postgresql import insert
 
@@ -63,6 +63,7 @@ def schedule_order_book_scan():
         tickers = db.execute(stmt).fetchall()
         for t, f in tickers: scan_order_book_for_ticker.delay(t, f)
 
+@celery_app.task(rate_limit="5/s")
 def scan_order_book_for_ticker(ticker: str, figi: str):
     with session_scope() as db:
         order_book = get_order_book(figi)
@@ -149,7 +150,9 @@ def scan_intraday_for_ticker(ticker: str, figi: str):
             meta = metrics_json if isinstance(metrics_json, dict) else json.loads(metrics_json)
             if "intraday" in meta:
                 upd = datetime.fromisoformat(meta["intraday"]["updated_at"])
-                if (datetime.utcnow() - upd).total_seconds() < 3600 * 3:
+                if upd.tzinfo is None:
+                    upd = upd.replace(tzinfo=timezone.utc)
+                if (datetime.now(timezone.utc) - upd).total_seconds() < 3600 * 3:
                     neural_trend = meta["intraday"]["trend"]
 
         final_trend = "Neutral"
@@ -172,7 +175,7 @@ def scan_intraday_for_ticker(ticker: str, figi: str):
             signal = find_ema_cross_short(data, neural_trend="DOWN")
 
         if signal:
-             signal_data = {
+            signal_data = {
                 "ticker": ticker,
                 "signal_type": signal["signal_type"],
                 "entry_price": signal["entry_price"],
@@ -181,15 +184,15 @@ def scan_intraday_for_ticker(ticker: str, figi: str):
                 "strategy": signal["strategy"],
                 "global_bias": bias,
                 "generated_at": pd.Timestamp.utcnow()
-             }
-             
-             stmt = insert(models.IntradaySignal).values(signal_data)
-             stmt = stmt.on_conflict_do_nothing(index_elements=['ticker', 'generated_at'])
-             db.execute(stmt)
+            }
+            
+            stmt = insert(models.IntradaySignal).values(signal_data)
+            stmt = stmt.on_conflict_do_nothing(index_elements=['ticker', 'generated_at'])
+            db.execute(stmt)
 
 @celery_app.task
 def schedule_ghost_scan():
-     with session_scope() as db:
+    with session_scope() as db:
         tickers = db.execute(text("SELECT ticker, figi FROM tracked_tickers WHERE ticker IN :l"), {"l": tuple(LIQUID_TICKERS)}).fetchall()
         for t, f in tickers: scan_ghost_activity.delay(t, f)
 
@@ -205,7 +208,7 @@ def scan_ghost_activity(ticker: str, figi: str):
             sig_time = s["signal_time"]
 
             if sig_time.tzinfo is None:
-                sig_time = sig_time.replace(tzinfo=None) 
+                sig_time = sig_time.replace(tzinfo=timezone.utc)
             
             if (datetime.utcnow() - sig_time.replace(tzinfo=None)).total_seconds() < 3600 * 4:
                 fresh_signals.append({

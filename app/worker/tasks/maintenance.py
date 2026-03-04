@@ -67,20 +67,20 @@ def recalculate_levels_for_ticker(self, ticker: str, figi: str):
         if not zones: return
         with session_scope() as db:
             db.execute(delete(models.KeyLevel).where(models.KeyLevel.ticker == ticker))
-        if zones:
-                data_to_insert = [
-                    {
-                        "ticker": ticker,
-                        "start_price": z["start_price"],
-                        "end_price": z["end_price"],
-                        "level_type": z["level_type"],
-                        "strength": z["strength"],
-                        "intensity": z["intensity"],
-                        "last_calculated_at": pd.Timestamp.utcnow() # Важно: Python datetime, не SQL NOW()
-                    }
-                    for z in zones
-                ]
-                db.execute(insert(models.KeyLevel), data_to_insert)
+            if zones:
+                    data_to_insert = [
+                        {
+                            "ticker": ticker,
+                            "start_price": z["start_price"],
+                            "end_price": z["end_price"],
+                            "level_type": z["level_type"],
+                            "strength": z["strength"],
+                            "intensity": z["intensity"],
+                            "last_calculated_at": pd.Timestamp.utcnow() # Важно: Python datetime, не SQL NOW()
+                        }
+                        for z in zones
+                    ]
+                    db.execute(insert(models.KeyLevel), data_to_insert)
     except Exception as e:
         logger.error(f"Level calc error {ticker}: {e}")
 

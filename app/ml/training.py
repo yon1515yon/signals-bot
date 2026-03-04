@@ -9,6 +9,8 @@ import pandas as pd
 import torch
 import torch.nn as nn
 import structlog
+import joblib
+import pandas_ta as ta 
 
 from app.ml.backtest_engine import run_backtrader_wfa 
 from app.services.services import get_combined_macro_data, get_cross_asset_data, get_historical_data
@@ -39,51 +41,45 @@ GLOBAL_MODEL_PATH = f"{settings.MODEL_STORAGE_PATH}/GLOBAL_BASE_MODEL.pth"
 def prepare_features_and_scale(stock_data: pd.DataFrame):
     """Подготовка фичей и нормализация данных."""
     try:
-        df = validate_stock_data(df)
+        df = validate_stock_data(stock_data)
     except ValueError as e:
         print(f"Validation Error: {e}")
         return None, None, None, None, None
     
     try:
-        stock_data.ta.rsi(length=14, append=True)
-        stock_data.ta.macd(fast=12, slow=26, signal=9, append=True)
-        stock_data.ta.cci(length=20, append=True)
-        stock_data.ta.ema(length=50, append=True)
-        stock_data.ta.ema(length=200, append=True)
-        stock_data.ta.adx(length=14, append=True)
-        stock_data.ta.atr(length=14, append=True)
-        stock_data.ta.obv(append=True)
+        df.ta.rsi(length=14, append=True)
+        df.ta.macd(fast=12, slow=26, signal=9, append=True)
+        df.ta.atr(length=14, append=True)
+        df.ta.ema(length=12, append=True)
+        df.ta.ema(length=26, append=True)
+        df.ta.adx(length=14, append=True)
 
         stock_data["vol_ma_20"] = stock_data["volume"].rolling(window=20).mean()
         stock_data["volume_ratio"] = stock_data["volume"] / stock_data["vol_ma_20"]
     except Exception:
         pass
 
-    stock_data["day_of_week"] = stock_data["time"].dt.dayofweek
-    stock_data = pd.get_dummies(stock_data, columns=["day_of_week"], prefix="day")
-    stock_data["log_return"] = np.log1p(stock_data["close"].pct_change())
-
-    stock_data.replace([np.inf, -np.inf], np.nan, inplace=True)
-    stock_data.dropna(inplace=True)
-
-    if stock_data.empty:
+    df['log_return'] = np.log1p(df['close'].pct_change())
+    df['day_of_week'] = df['time'].dt.dayofweek
+    for i in range(5):
+        df[f'day_{i}'] = (df['day_of_week'] == i).astype(int)
+    
+    df.dropna(inplace=True)
+    
+    if len(df) < ML_CONFIG["TRAIN_WINDOW"] + 30:
         return None, None, None, None, None
 
-    if "volume" in stock_data.columns:
-        stock_data["volume"] = winsorize(stock_data["volume"], limits=[0.01, 0.01])
-
-    numeric_cols = stock_data.select_dtypes(include=np.number).columns.tolist()
-    feature_columns = [col for col in numeric_cols if col not in ["open", "high", "low"]]
-    output_columns = ["close", "volume", "RSI_14", "log_return"]
-
-    for col in output_columns:
-        if col not in feature_columns:
-            return None, None, None, None, None
-
-    scaler = MinMaxScaler(feature_range=(-1, 1))
-    data_normalized = scaler.fit_transform(stock_data[feature_columns])
-
-    return stock_data, data_normalized, scaler, feature_columns, output_columns
+    feature_cols = ['close', 'volume', 'RSI_14', 'ATRr_14', 'MACD_12_26_9', 
+                   'MACDs_12_26_9', 'EMA_12', 'EMA_26', 'ADX_14', 'log_return'] + \
+                   [f'day_{i}' for i in range(5)]
+    
+    available_cols = [c for c in feature_cols if c in df.columns]
+    output_cols = ['close', 'volume', 'RSI_14', 'log_return']
+    
+    scaler = StandardScaler()
+    data_normalized = scaler.fit_transform(df[available_cols].values)
+    
+    return df, data_normalized, scaler, available_cols, output_cols
 
 
 def train_global_base_model(tickers_list: list, figi_map: dict):

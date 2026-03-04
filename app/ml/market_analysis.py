@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pandas as pd
+import pandas_ta as ta
 from celery.utils.log import get_task_logger
 
 from app.core.cache import redis_client

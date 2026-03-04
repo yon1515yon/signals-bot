@@ -5,18 +5,23 @@ from datetime import datetime
 import joblib
 import numpy as np
 import pandas as pd
+import pandas_ta as ta
+import structlog
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.constants import MAX_SPREAD_PCT, ROBUST_FACTOR
-from app.ml.market_analysis import get_market_regime_cached
+from app.ml.market_analysis import get_global_market_regime
 from app.ml.meta_model import get_meta_prediction_with_shap
 from app.services.services import get_historical_data, get_order_book
 
 MODEL_STORAGE_PATH = settings.MODEL_STORAGE_PATH
 
+def get_global_regime_cached():
 
+    from app.ml.market_analysis import get_market_regime_cached as get_regime_func
+    return get_regime_func()
 
 def check_liquidity_and_spread(order_book: dict, MIN_LIQUIDITY_RUB=1000000) -> bool:
     """Filter by liquidity and spread."""
@@ -390,10 +395,10 @@ def run_scanner(db: Session, market_regime_unused: str = None):
 
         # Расчет размера позиции (множитель)
         size_mult = 1.0
-        if meta_score > 0.8:
-            size_mult = 1.5
-        elif meta_score > 0.9:
+        if meta_score > 0.9:
             size_mult = 2.0
+        elif meta_score > 0.8:
+            size_mult = 1.5
         elif meta_score < 0.6:
             size_mult = 0.5
 

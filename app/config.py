@@ -19,6 +19,9 @@ class Settings(BaseSettings):
     TELEGRAM_BOT_TOKEN: str
     NEWS_API_KEY: str | None = None
 
+    # --- Настройки приложения ---
+    DEBUG: bool = False  # Добавлено поле, отсутствовавшее ранее
+    
     # --- Пути и URL ---
     API_BASE_URL: str = "http://api:8000"
     MODEL_STORAGE_PATH: str = "/app/models_storage"

@@ -19,7 +19,7 @@ LIQUID_TICKERS = [
 ]
 
 # --- Внешние URL ---
-CBR_KEY_RATE_URL = "http://www.cbr.ru/scripts/KeyRate_xml.asp"
+CBR_KEY_RATE_URL = "https://www.cbr.ru/scripts/KeyRate_xml.asp"
 ROSSTAT_INFLATION_URL = "https://rosstat.gov.ru/storage/mediabank/ipc_mes_gg_28-05-2024.csv"
 
 # --- Параметры ML (из model.py) ---
@@ -72,3 +72,16 @@ AI_SL_SAFETY_MARGIN = 1.1
 ATR_SL_MULTIPLIER = 2.0    
 LEVEL_SL_MARGIN = 0.995    
 FIXED_SL_PERCENT = 0.95    
+
+# --- WinRate Optimization ---
+WINRATE_CONFIDENCE_THRESHOLD = 0.75
+META_MODEL_MIN_TRADES = 80
+
+# "Dirty market" filter thresholds
+MARKET_FILTER_MIN_ADX = 18.0
+MARKET_FILTER_MIN_ATR_PCT = 0.35
+MARKET_FILTER_MAX_ATR_ZSCORE = 2.5
+
+# Label quality (TP/SL vs spread proxy)
+MIN_TP_TO_SPREAD_RATIO = 2.5
+MIN_SL_TO_SPREAD_RATIO = 1.2
